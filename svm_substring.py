@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import time
 
 #substring kernel
 def substring_kernel(s1: str, s2: str, k: int) -> int:
@@ -133,7 +134,14 @@ class KernelSVM:
             H = min(self.C, alpha_j + alpha_i)
         return L, H
 
-    def predict_multiple_files(self, test_files: list, output_file: str, k: int):
+    def predict(self, valid_sequences, valid_labels, k ):
+        K_test = self._compute_test_kernel(valid_sequences, k)
+        scores = (self.alpha * self.y_train).dot(K_test.T) + self.b
+        pred_labels = np.where(scores >= 0, 1, 0)
+        true_predictions = sum(p == r for p, r in zip(pred_labels, valid_labels))  # 计算正确预测数
+        return  true_predictions / len(valid_labels)
+
+    def predict_file(self, file_path: str, k: int):
         """
         预测多个测试文件并合并结果到单个CSV
         
@@ -142,42 +150,33 @@ class KernelSVM:
             output_file: 输出文件路径（ytest.csv）
             k: 子串长度参数
         """
-        all_results = []
-        
-        for file_path in test_files:
-            try:
-                # 加载单个测试文件
-                df_test = pd.read_csv(file_path)
-                if {'Id', 'seq'} - set(df_test.columns):
-                    raise ValueError(f"文件 {file_path} 缺少ID或seq列")
-                
-                # 执行预测
-                test_sequences = df_test['seq'].tolist()
-                test_ids = df_test['Id'].tolist()
-                
-                K_test = self._compute_test_kernel(test_sequences, k)
-                scores = (self.alpha * self.y_train).dot(K_test.T) + self.b
-                pred_labels = np.where(scores >= 0, 1, 0)
-                
-                # 暂存结果
-                all_results.append(pd.DataFrame({
-                    'Id': test_ids,
-                    'Bound': pred_labels
-                }))
-                
-                print(f"已完成 {file_path} 的预测")
-                
-            except Exception as e:
-                print(f"文件 {file_path} 处理失败: {str(e)}")
-                continue
-        
-        # 合并所有结果
-        final_df = pd.concat(all_results, ignore_index=True)
-    
-        # 保存结果
-        final_df.to_csv(output_file, index=False)
-        print(f"合并后的预测结果已保存至 {output_file}")
+        try:
+            # 加载单个测试文件
+            df_test = pd.read_csv(file_path)
+            if {'Id', 'seq'} - set(df_test.columns):
+                raise ValueError(f"文件 {file_path} 缺少ID或seq列")
+            
+            # 执行预测
+            test_sequences = df_test['seq'].tolist()
+            test_ids = df_test['Id'].tolist()
+            
+            K_test = self._compute_test_kernel(test_sequences, k)
+            scores = (self.alpha * self.y_train).dot(K_test.T) + self.b
+            pred_labels = np.where(scores >= 0, 1, 0)
+            
+            # 暂存结果
+            retsult = pd.DataFrame({
+                'Id': test_ids,
+                'Bound': pred_labels
+            })
+            
+            print(f"已完成 {file_path} 的预测")
+            
+        except Exception as e:
+            print(f"文件 {file_path} 处理失败: {str(e)}")
 
+        return retsult
+    
     def _compute_test_kernel(self, test_sequences: list, k: int) -> np.ndarray:
         """ 计算测试集核矩阵 """
         n_test = len(test_sequences)
@@ -190,7 +189,7 @@ class KernelSVM:
                 K_test[i,j] = substring_kernel(test_sequences[i], self.X_train[j], k)
         return K_test
     
-def load_multiple_data(seq_files: list, label_files: list) -> tuple:
+def load_data(seq_file: str, label_file: str) -> tuple:
     """
     加载多组CSV文件并合并数据
     
@@ -201,52 +200,92 @@ def load_multiple_data(seq_files: list, label_files: list) -> tuple:
     返回:
         (sequences, labels): 合并后的序列列表和标签数组
     """
-    # 检查文件数量匹配
-    if len(seq_files) != len(label_files):
-        raise ValueError("seq_files和label_files的数量必须相同")
-    
     # 合并所有数据
-    merged_dfs = []
-    for seq_file, label_file in zip(seq_files, label_files):
-        # 读取单个文件对
-        df_seq = pd.read_csv(seq_file)
-        df_label = pd.read_csv(label_file)
-        
-        # 合并单个文件对
-        merged = pd.merge(df_seq, df_label, on='Id', how='inner')
-        if merged.empty:
-            print(f"警告: {seq_file}和{label_file}中没有匹配的ID")
-            continue
-            
-        merged_dfs.append(merged)
+    df_seq = pd.read_csv(seq_file)
+    df_label = pd.read_csv(label_file)
     
-    # 合并所有数据
-    full_df = pd.concat(merged_dfs, ignore_index=True)
+    merged = pd.merge(df_seq, df_label, on='Id', how='inner')
+    if merged.empty:
+        print(f"警告: {seq_file}和{label_file}中没有匹配的ID")
 
     # 提取数据
-    sequences = full_df['seq'].tolist()
-    labels = np.where(full_df['Bound'] == 1, 1, -1)
-    
+    sequences = merged['seq'].values
+    labels = np.where(merged['Bound'] == 1, 1, -1)
     return sequences, labels
 
-# 数据准备（示例）
+def split_data(sequences, labels, split_ratio=0.2, seed=42):
+    # 20% label 0 and 20% label 1 in validation set
+    np.random.seed(seed)  # 保证结果可复现
 
+    # 分别存储 label=0 和 label=1 的索引
+    indices_0 = [i for i, label in enumerate(labels) if label == 0]
+    indices_1 = [i for i, label in enumerate(labels) if label == 1]
+
+    # 打乱索引
+    np.random.shuffle(indices_0)
+    np.random.shuffle(indices_1)
+
+    # 计算划分点
+    split_0 = int(len(indices_0) * (1 - split_ratio))
+    split_1 = int(len(indices_1) * (1 - split_ratio))
+
+    # 获取训练集和验证集索引
+    train_indices = indices_0[:split_0] + indices_1[:split_1]
+    valid_indices = indices_0[split_0:] + indices_1[split_1:]
+
+    # 由于索引合并后顺序可能是打乱的，我们再打乱一次确保混合训练
+    np.random.shuffle(train_indices)
+    np.random.shuffle(valid_indices)
+
+    # 根据索引提取数据
+    train_seq = sequences[np.array(train_indices)]
+    valid_seq = sequences[np.array(valid_indices)]
+    train_label = labels[np.array(train_indices)]
+    valid_label = labels[np.array(valid_indices)]
+    return train_seq, valid_seq, train_label, valid_label
+
+# 数据准备（示例）
+t0 = time.time()
 seq_files =["data/Xtr0.csv","data/Xtr1.csv","data/Xtr2.csv"]
 label_files = ["data/Ytr0.csv","data/Ytr1.csv","data/Ytr2.csv"]
 seq_test_files = ["data/Xte0.csv","data/Xte1.csv","data/Xte2.csv"]
 y_test_file = "data/Ytrk.csv"
-sequences_train, labels_train = load_multiple_data(seq_files, label_files)
 # 步骤1：计算核矩阵
 k = 3  # substring长度参数
-K_train = compute_kernel_matrix(sequences_train, substring_kernel, k)
 
-# 步骤2：训练核SVM
-svm = KernelSVM(C=1.0, max_iters=1000)
-svm.fit(K_train, labels_train, sequences_train)
+outputs=[]
+for i in range(len(seq_files)):
+    seq_file = seq_files[i]
+    label_file = label_files[i]
+    sequences_train, labels_train = load_data(seq_file, label_file)
+    train_seq, valid_seq, train_label, valid_label =  split_data(sequences_train, labels_train)
 
-# 步骤3：预测
-svm.predict_multiple_files(
-    test_files=seq_test_files,
-    output_file=y_test_file,
-    k=k
-)
+    K_train = compute_kernel_matrix(train_seq, substring_kernel, k)
+
+    # training 
+    # TODO: OPTUNA
+    # find best hyperparametre for C, max iters
+
+    svm = KernelSVM(C=5.0, max_iters=10000)
+    svm.fit(K_train, train_label, train_seq)
+
+    # validation
+    valid_precision = svm.predict(valid_seq, valid_label, k=k)
+    print(f"precision of kernel {i} : {valid_precision}")
+
+    # prediction
+    seq_test_file = seq_test_files[i]
+    output = svm.predict_file(
+        file_path=seq_test_file,
+        k=k
+    )
+    outputs.append(output)
+
+# 合并所有结果
+
+final_df = pd.concat(outputs, ignore_index=True)
+final_df.to_csv(y_test_file, index=False)
+print(f"合并后的预测结果已保存至 {y_test_file}")
+t1 = time.time()
+print('done in {:.3f} seconds'.format(t1 - t0))
+
