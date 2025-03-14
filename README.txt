@@ -6,3 +6,5 @@ as well as in spectrum_kernel_notebook.ipynb.
 
 The substring kernel is implemented in the svm_subtring.py file.
 The Weisfeiler-Lehman kernel is implemented in the wl_kernel_svm.py file. 
+
+The initial dataset analysis can be found in the notebook named data_analysis_init.ipynb
